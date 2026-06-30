@@ -29,13 +29,7 @@ Tampermonkey bör då känna igen filen som ett userscript och visa installation
 
 ## Uppdateringar
 
-Scriptet har `@updateURL` och `@downloadURL` som pekar mot raw-filen i detta repo. För att Tampermonkey ska hitta nya versioner behöver `@version` bumpas vid varje release.
-
-Exempel:
-
-```js
-// @version      1.0.3
-```
+Scriptet har `@updateURL` och `@downloadURL` som pekar mot raw-filen i detta repo.
 
 ## Filer
 
