@@ -6,6 +6,7 @@
 // @author       Linus, based on the code from Schanihbg/webhallen-userscript
 // @match        https://www.webhallen.com/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=webhallen.com
+// @homepageURL  https://github.com/hiroseaki/webhallen-cached-stats
 // @updateURL    https://raw.githubusercontent.com/hiroseaki/webhallen-cached-stats/main/userscript/webhallen-cached-stats.user.js
 // @downloadURL  https://raw.githubusercontent.com/hiroseaki/webhallen-cached-stats/main/userscript/webhallen-cached-stats.user.js
 // @run-at       document-idle
