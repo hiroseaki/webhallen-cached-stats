@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.3
+
+### Fixed
+
+- Improved CSV export price detection for order rows.
+- Empty price fields are no longer exported as `0`.
+- Renamed `Pris` to `Produktpris` in the CSV export.
+- Removed the empty `Orderstatus` column from the CSV export.
+- Removed the ambiguous `Ordersumma` column from the CSV export.
+
 ## 1.0.2
 
 Initial public release of Webhallen Cached Stats.

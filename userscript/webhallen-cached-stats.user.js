@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Webhallen cached stats
 // @namespace    Webhallen
-// @version      1.0.2
+// @version      1.0.3
 // @description  Adds a faster statistics page with persistent local order cache and incremental sync.
 // @author       Linus, based on the code from Schanihbg/webhallen-userscript
 // @match        https://www.webhallen.com/*
@@ -248,7 +248,63 @@
   }
 
   function csvNumber(value) {
-    return String(Number(value || 0)).replace(".", ",");
+    if (value === null || value === undefined || value === "") return "";
+    const number = Number(value);
+    return Number.isNaN(number) ? String(value) : String(number).replace(".", ",");
+  }
+
+  function getPathValue(object, path) {
+    return path.split(".").reduce((value, key) => value?.[key], object);
+  }
+
+  function firstValue(object, paths) {
+    for (const path of paths) {
+      const value = getPathValue(object, path);
+      if (value !== null && value !== undefined && value !== "") return value;
+    }
+    return "";
+  }
+
+  function numberValue(value) {
+    if (value === null || value === undefined || value === "") return null;
+    const number = Number(String(value).replace(/\s/g, "").replace(",", "."));
+    return Number.isNaN(number) ? null : number;
+  }
+
+  function getOrderRowPrices(row) {
+    const quantity = Number(row.quantity || row.qty || 1) || 1;
+    let totalPrice = numberValue(firstValue(row, [
+      "totalPrice",
+      "rowTotal",
+      "lineTotal",
+      "rowSum",
+      "priceTotal",
+      "amountTotal",
+      "lineSum",
+      "totalInclVat",
+    ]));
+    let unitPrice = numberValue(firstValue(row, [
+      "unitPrice",
+      "unitPriceInclVat",
+      "unitPriceIncVat",
+      "priceInclVat",
+      "priceIncVat",
+      "priceWithVat",
+      "sellPrice",
+      "salePrice",
+      "productPrice",
+      "rowPrice",
+      "price",
+    ]));
+
+    if (unitPrice === null && totalPrice !== null) unitPrice = totalPrice / quantity;
+    if (totalPrice === null && unitPrice !== null) totalPrice = unitPrice * quantity;
+
+    return {
+      quantity,
+      unitPrice: unitPrice ?? "",
+      totalPrice: totalPrice ?? "",
+    };
   }
 
   function orderExportRows(orders) {
@@ -257,18 +313,16 @@
       return rows.map((row) => {
         const product = row.product || {};
         const categories = String(product.categoryTree || "").split("/");
+        const prices = getOrderRowPrices(row);
         return {
           orderDate: formatDate(order.orderDate),
           sentDate: formatDate(order.sentDate),
           orderNumber: order.id || "",
           store: order.store?.name || "",
-          orderStatus: order.status || order.orderStatus || "",
-          orderTotal: order.totalSum || "",
           articleNumber: product.id || row.productId || row.id || "",
           productName: product.name || row.name || "",
-          quantity: row.quantity || 1,
-          price: row.price || "",
-          totalPrice: row.totalPrice || "",
+          quantity: prices.quantity,
+          price: prices.unitPrice,
           category: categories[0] || "",
           subcategory: categories[1] || "",
           categoryTree: product.categoryTree || "",
@@ -283,18 +337,15 @@
       ["Skickat datum", "sentDate"],
       ["Ordernummer", "orderNumber"],
       ["Butik", "store"],
-      ["Orderstatus", "orderStatus"],
-      ["Ordersumma", "orderTotal"],
       ["Artikelnummer", "articleNumber"],
       ["Produktnamn", "productName"],
       ["Antal", "quantity"],
-      ["Pris", "price"],
-      ["Radtotal", "totalPrice"],
+      ["Produktpris", "price"],
       ["Huvudkategori", "category"],
       ["Underkategori", "subcategory"],
       ["Kategoriträd", "categoryTree"],
     ];
-    const numericKeys = new Set(["orderTotal", "quantity", "price", "totalPrice"]);
+    const numericKeys = new Set(["quantity", "price"]);
     const rows = orderExportRows(orders);
     const csvRows = [
       columns.map(([label]) => csvEscape(label)).join(";"),
