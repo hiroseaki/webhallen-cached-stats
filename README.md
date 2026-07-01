@@ -1,6 +1,6 @@
 # Webhallen Cached Stats
 
-Tampermonkey-userscript som lägger till en cachad statistiksida på Webhallens medlemssidor.
+Tampermonkey-userscript som lägger till cachad statistik och cachade recensioner på Webhallens medlemssidor.
 
 Scriptet bygger vidare på kod från [Schanihbg/webhallen-userscript](https://github.com/Schanihbg/webhallen-userscript), men sparar orderhistorik lokalt i IndexedDB och uppdaterar sedan bara nya ordrar när cachen är komplett.
 
@@ -26,6 +26,12 @@ Tampermonkey bör då känna igen filen som ett userscript och visa installation
   - Ordrar per månad
 - Sorterbara tabeller.
 - Export av cachad orderdata till semikolonseparerad CSV för Excel-import.
+- Cachad recensionvy som utgår från ordercachen och visar:
+  - Recensioner som hittats på köpta produkter.
+  - Köpta produkter som verkar sakna recension.
+  - Lokal reviewcache i IndexedDB.
+
+Obs: Recensioner där användarnamnet dolts på Webhallen kan inte säkert matchas mot kontot via publika produktrecensioner och kan därför visas som saknade.
 
 ## Uppdateringar
 
