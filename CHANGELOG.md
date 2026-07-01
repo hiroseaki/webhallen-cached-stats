@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.0
+
+### Added
+
+- Added `Recensioner (cached ver.)` to Webhallen member pages.
+- Added local IndexedDB cache for purchased-product review checks.
+- Added review sync that reuses the existing local order cache as product source.
+- Shows posted reviews and purchased products that are missing reviews.
+- Added a note that anonymous reviews cannot be matched to the logged-in account.
+
 ## 1.0.3
 
 ### Fixed

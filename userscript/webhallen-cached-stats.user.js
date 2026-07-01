@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Webhallen cached stats
 // @namespace    Webhallen
-// @version      1.0.3
+// @version      1.1.0
 // @description  Adds a faster statistics page with persistent local order cache and incremental sync.
 // @author       Linus, based on the code from Schanihbg/webhallen-userscript
 // @match        https://www.webhallen.com/*
@@ -18,8 +18,9 @@
   "use strict";
 
   const DB_NAME = "webhallen-cached-stats";
-  const DB_VERSION = 1;
+  const DB_VERSION = 2;
   const ORDER_STORE = "orders";
+  const REVIEW_STORE = "reviews";
   const META_STORE = "meta";
 
   let cachedMe = null;
@@ -87,6 +88,10 @@
           const orders = db.createObjectStore(ORDER_STORE, { keyPath: "cacheKey" });
           orders.createIndex("userId", "userId", { unique: false });
           orders.createIndex("userOrder", ["userId", "orderDate"], { unique: false });
+        }
+        if (!db.objectStoreNames.contains(REVIEW_STORE)) {
+          const reviews = db.createObjectStore(REVIEW_STORE, { keyPath: "cacheKey" });
+          reviews.createIndex("userId", "userId", { unique: false });
         }
         if (!db.objectStoreNames.contains(META_STORE)) {
           db.createObjectStore(META_STORE, { keyPath: "key" });
@@ -171,6 +176,90 @@
     await txDone(tx);
   }
 
+  async function getCachedReviewRows(userId) {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(REVIEW_STORE, "readonly");
+      const index = tx.objectStore(REVIEW_STORE).index("userId");
+      const request = index.getAll(String(userId));
+      request.onsuccess = () => resolve(request.result || []);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  async function saveReviewRows(userId, rows) {
+    if (!rows.length) return;
+    const db = await openDb();
+    const tx = db.transaction(REVIEW_STORE, "readwrite");
+    const store = tx.objectStore(REVIEW_STORE);
+    for (const row of rows) {
+      store.put({
+        ...row,
+        cacheKey: `${userId}:${row.product}`,
+        userId: String(userId),
+        checkedAt: Date.now(),
+      });
+    }
+    await txDone(tx);
+  }
+
+  function purchasedProductsFromOrders(orders) {
+    const products = new Map();
+    orderRows(orders).forEach((row) => {
+      const product = row.product || {};
+      const id = product.id || row.productId || row.id;
+      if (!id || products.has(String(id))) return;
+      products.set(String(id), {
+        id: String(id),
+        name: product.name || row.name || `Produkt ${id}`,
+      });
+    });
+    return [...products.values()];
+  }
+
+  async function fetchProductReviews(productId) {
+    const reviews = [];
+    let page = 1;
+    while (true) {
+      const data = await fetchApi(`/api/reviews?products[0]=${encodeURIComponent(productId)}&sortby=latest`, { page });
+      const pageReviews = Array.isArray(data.reviews) ? data.reviews : [];
+      if (!pageReviews.length) break;
+      reviews.push(...pageReviews);
+      page++;
+    }
+    return reviews;
+  }
+
+  async function syncReviews(userId, products, { onProgress = () => {} } = {}) {
+    const syncedRows = [];
+    for (let index = 0; index < products.length; index++) {
+      const product = products[index];
+      onProgress({ current: index, total: products.length, product });
+      const reviews = await fetchProductReviews(product.id);
+      const userReview = reviews.find((review) => {
+        if (review.isAnonymous) return false;
+        return String(review.user?.id || "") === String(userId);
+      }) || null;
+      const row = {
+        product: product.id,
+        productName: product.name,
+        review: userReview,
+      };
+      syncedRows.push(row);
+      await saveReviewRows(userId, [row]);
+    }
+    onProgress({ current: products.length, total: products.length, product: null });
+    await setMeta(`${userId}:reviews`, {
+      lastReviewSyncAt: Date.now(),
+      lastReviewProductCount: products.length,
+      lastReviewHitCount: syncedRows.filter((row) => row.review).length,
+    });
+    return {
+      rows: await getCachedReviewRows(userId),
+      meta: await getMeta(`${userId}:reviews`),
+    };
+  }
+
   async function fetchOrderPage(userId, page) {
     const data = await fetchApi(`/api/order/user/${encodeURIComponent(userId)}?filters[history]=true&sort=orderStatus`, { page });
     return Array.isArray(data.orders) ? data.orders.filter((order) => !order.error) : [];
@@ -237,6 +326,36 @@
       month: "2-digit",
       day: "2-digit",
     }).format(new Date(Number(timestamp) * 1000));
+  }
+
+  function timeAgo(unixTimestamp) {
+    const now = Math.floor(Date.now() / 1000);
+    const secondsAgo = now - Number(unixTimestamp || 0);
+    const timeUnits = [
+      { singular: "år", plural: "år", seconds: 365 * 24 * 60 * 60 },
+      { singular: "månad", plural: "månader", seconds: 30 * 24 * 60 * 60 },
+      { singular: "dag", plural: "dagar", seconds: 24 * 60 * 60 },
+      { singular: "timma", plural: "timmar", seconds: 60 * 60 },
+      { singular: "minut", plural: "minuter", seconds: 60 },
+    ];
+    for (const { singular, plural, seconds } of timeUnits) {
+      const count = Math.floor(secondsAgo / seconds);
+      if (count >= 1) return count === 1 ? `1 ${singular} sedan` : `${count} ${plural} sedan`;
+    }
+    return "Just nu";
+  }
+
+  function unixTimestampToLocale(unixTimestamp) {
+    if (!unixTimestamp) return "";
+    return new Intl.DateTimeFormat(navigator.language || "sv-SE", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      hour: "numeric",
+      minute: "numeric",
+      second: "numeric",
+      timeZoneName: "short",
+    }).format(new Date(Number(unixTimestamp) * 1000));
   }
 
   function orderRows(orders) {
@@ -756,6 +875,107 @@
     return div;
   }
 
+  function getPostedReviews(reviews) {
+    return reviews.filter((orderReview) => orderReview.review).sort((a, b) => {
+      return Number(b.review?.createdAt || 0) - Number(a.review?.createdAt || 0);
+    });
+  }
+
+  function getProductsWithoutReviews(reviews) {
+    return reviews.filter((orderReview) => !orderReview.review);
+  }
+
+  function generateReviewTable(reviewData) {
+    const table = el("table", { class: "table table-condensed table-striped tech-specs-table" });
+    reviewData.forEach((review) => {
+      if (!review.review) return;
+      const tbody = el("tbody");
+      const row1 = el("tr");
+      const row2 = el("tr");
+      const productCell = el("td");
+      const timestampCell = el("td");
+      const scoreCell = el("td");
+      const voteCell = el("td");
+      const reviewCell = el("td");
+
+      productCell.style.whiteSpace = "normal";
+      productCell.style.wordBreak = "normal";
+      productCell.appendChild(el("a", {
+        href: `https://www.webhallen.com/${review.product}`,
+        target: "_blank",
+        rel: "noopener noreferrer",
+      }, [`${review.product} ${review.review.product?.name || review.productName || ""}`]));
+
+      timestampCell.style.textAlign = "center";
+      const timestamp = el("span", {
+        title: unixTimestampToLocale(review.review.createdAt),
+        text: timeAgo(review.review.createdAt),
+      });
+      timestampCell.appendChild(timestamp);
+
+      scoreCell.style.textAlign = "center";
+      const starsDiv = el("div", { class: "stars", title: `${review.review.rating} / 5` });
+      starsDiv.style.textAlign = "middle";
+      const starsContentDiv = el("div", { class: "stars-content stars-content-bg" });
+      starsContentDiv.style.width = `${Number(review.review.rating || 0) / 5 * 100}%`;
+      starsDiv.appendChild(starsContentDiv);
+      scoreCell.appendChild(starsDiv);
+
+      voteCell.style.textAlign = "right";
+      const votesDiv = el("div", { class: "votes" });
+      const thumbUp = el("span", {
+        title: "Tumme upp",
+        class: "vote vote-up secondary",
+        text: String(review.review.upvotes || 0),
+      });
+      thumbUp.style.cursor = "auto";
+      thumbUp.style.userSelect = "auto";
+      const thumbDown = el("span", {
+        title: "Tumme ner",
+        class: "vote vote-down secondary",
+        text: String(review.review.downvotes || 0),
+      });
+      thumbDown.style.cursor = "auto";
+      thumbDown.style.userSelect = "auto";
+      votesDiv.appendChild(thumbUp);
+      votesDiv.appendChild(thumbDown);
+      voteCell.appendChild(votesDiv);
+
+      reviewCell.style.whiteSpace = "normal";
+      reviewCell.style.wordBreak = "normal";
+      reviewCell.colSpan = 4;
+      reviewCell.textContent = review.review.text || "";
+
+      row1.appendChild(productCell);
+      row1.appendChild(timestampCell);
+      row1.appendChild(scoreCell);
+      row1.appendChild(voteCell);
+      row2.appendChild(reviewCell);
+      tbody.appendChild(row1);
+      tbody.appendChild(row2);
+      table.appendChild(tbody);
+    });
+    return table;
+  }
+
+  function generateMissingReviewTable(reviewData) {
+    const table = el("table", { class: "table table-condensed table-striped tech-specs-table" });
+    const tbody = el("tbody");
+    reviewData.forEach((review) => {
+      const row = el("tr");
+      const productCell = el("td");
+      productCell.appendChild(el("a", {
+        href: `https://www.webhallen.com/${review.product}`,
+        target: "_blank",
+        rel: "noopener noreferrer",
+      }, [`${review.product}${review.productName ? ` ${review.productName}` : ""}`]));
+      row.appendChild(productCell);
+      tbody.appendChild(row);
+    });
+    table.appendChild(tbody);
+    return table;
+  }
+
   function setSyncStatus(status, message = "", isSyncing = false) {
     if (!status) return;
     status.textContent = "";
@@ -773,7 +993,7 @@
     });
   }
 
-  function setStatsLinkActive() {
+  function setVirtualLinkActive(selector) {
     document.querySelectorAll(".router-link-exact-active.router-link-active").forEach((link) => {
       link.classList.remove("router-link-exact-active", "router-link-active");
     });
@@ -781,18 +1001,26 @@
       item.classList.remove("active");
     });
 
-    const link = document.querySelector("[data-whcs-stats-link]");
+    const link = document.querySelector(selector);
     if (link) {
       link.classList.add("router-link-exact-active", "router-link-active");
       link.closest("li")?.classList.add("active");
     }
   }
 
-  function clearStatsLinkActive() {
-    const link = document.querySelector("[data-whcs-stats-link]");
-    if (!link) return;
-    link.classList.remove("router-link-exact-active", "router-link-active");
-    link.closest("li")?.classList.remove("active");
+  function setStatsLinkActive() {
+    setVirtualLinkActive("[data-whcs-stats-link]");
+  }
+
+  function setReviewsLinkActive() {
+    setVirtualLinkActive("[data-whcs-reviews-link]");
+  }
+
+  function clearVirtualLinkActive() {
+    document.querySelectorAll("[data-whcs-stats-link], [data-whcs-reviews-link]").forEach((link) => {
+      link.classList.remove("router-link-exact-active", "router-link-active");
+      link.closest("li")?.classList.remove("active");
+    });
   }
 
   async function renderStats(container, user, orders, meta) {
@@ -916,6 +1144,33 @@
     }
   }
 
+  async function runReviewSyncAndRender(container, user, { status }) {
+    const syncKey = `${user.id}:reviews`;
+    if (syncingUsers.has(syncKey)) return;
+
+    const orders = await getCachedOrders(user.id);
+    const products = purchasedProductsFromOrders(orders);
+    if (!products.length) {
+      setSyncStatus(status, "Ingen ordercache hittades. Gå till Statistik och bygg ordercache först.");
+      return;
+    }
+
+    syncingUsers.add(syncKey);
+    setSyncButtonsDisabled(container, true);
+    try {
+      const result = await syncReviews(user.id, products, {
+        onProgress: ({ current, total }) => {
+          setSyncStatus(status, `Hämtar recensioner för produkt ${Math.min(current + 1, total)} av ${total}.`, true);
+        },
+      });
+      setSyncStatus(status, `Klart. Kontrollerade ${products.length} produkter.`);
+      await renderReviews(container, user, result.rows, result.meta);
+    } finally {
+      syncingUsers.delete(syncKey);
+      setSyncButtonsDisabled(container, false);
+    }
+  }
+
   function findInjectPath() {
     const selectors = ["section", "div.member-subpage", "div.container"];
     let target = null;
@@ -971,6 +1226,91 @@
     }
   }
 
+  async function renderReviews(container, user, reviewRows, meta) {
+    container.innerHTML = "";
+    setReviewsLinkActive();
+
+    container.appendChild(el("h2", { class: "level-one-heading mb-5", text: "Mina recensioner" }));
+    container.appendChild(el("hr"));
+    container.appendChild(el("div", {
+      class: "mb-5",
+      text: "Här hittar du dina recensioner och köpta produkter som saknar recension. Datan sparas lokalt i webbläsaren.",
+    }));
+    container.appendChild(el("div", {
+      class: "whcs-notice mb-5",
+      text: "Obs: Recensioner där du valt att dölja användarnamnet kan inte matchas mot ditt konto via Webhallens publika produktrecensioner och kan därför visas som saknade.",
+    }));
+
+    const actions = el("div", { class: "whcs-actions" });
+    const status = el("div", { class: "whcs-status" });
+    actions.appendChild(el("button", {
+      class: "text-btn",
+      type: "button",
+      onclick: async () => {
+        await runReviewSyncAndRender(container, user, { status });
+      },
+      text: "Synka recensioner",
+    }));
+    container.appendChild(actions);
+
+    const cacheNote = el("div", {
+      class: "whcs-cache-note",
+      text: `Reviewcache: ${reviewRows.length} produkter. Senast synkad: ${formatDateTime(meta?.lastReviewSyncAt)}.`,
+    });
+    cacheNote.appendChild(status);
+    container.appendChild(cacheNote);
+
+    if (!reviewRows.length) {
+      container.appendChild(addDataToDiv("Status", el("div", {
+        class: "whcs-empty",
+        text: "Ingen reviewcache hittades ännu. Klicka på Synka recensioner för att börja.",
+      })));
+      return;
+    }
+
+    const userReviews = getPostedReviews(reviewRows);
+    const missingReviews = getProductsWithoutReviews(reviewRows);
+
+    if (userReviews.length) {
+      container.appendChild(addDataToDiv("Recensioner", generateReviewTable(userReviews)));
+    } else {
+      container.appendChild(addDataToDiv("Recensioner", el("div", {
+        class: "whcs-empty",
+        text: "Hittade inga publicerade recensioner i den lokala reviewcachen.",
+      })));
+    }
+
+    if (missingReviews.length) {
+      container.appendChild(addDataToDiv("Produkter du köpt som saknar recension", generateMissingReviewTable(missingReviews)));
+    }
+  }
+
+  async function showReviews(event) {
+    if (event) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+
+    try {
+      const user = await fetchMe();
+      if (!user) {
+        renderError("Kunde inte hitta inloggad Webhallen-användare.");
+        return;
+      }
+      const container = findInjectPath();
+      if (!container) {
+        alert("Kunde inte hitta rätt plats att visa recensionerna på. Prova att ladda om Webhallen-sidan.");
+        return;
+      }
+      const rows = await getCachedReviewRows(user.id);
+      const meta = await getMeta(`${user.id}:reviews`);
+      await renderReviews(container, user, rows, meta);
+    } catch (error) {
+      console.error(error);
+      renderError(`Kunde inte visa recensioner: ${error.message || error}`);
+    }
+  }
+
   function addStatsLink() {
     if (document.querySelector("[data-whcs-stats-link]")) return;
     const nav = document.querySelector(".member-nav .desktop-wrap .nav");
@@ -993,6 +1333,28 @@
     nav.appendChild(item);
   }
 
+  function addReviewsLink() {
+    if (document.querySelector("[data-whcs-reviews-link]")) return;
+    const nav = document.querySelector(".member-nav .desktop-wrap .nav");
+    if (!nav) return;
+
+    const item = el("li", { class: "tile" });
+    const link = el("a", {
+      href: "#",
+      "data-whcs-reviews-link": "1",
+      title: "Visa recensioner från lokal cache",
+    });
+    const image = el("img", {
+      src: "//www.webhallen.com/img/icons/feed/feed_review.svg",
+      class: "member-icon",
+      alt: "Recensioner (cached ver.)",
+    });
+    link.appendChild(image);
+    link.appendChild(document.createTextNode("Recensioner (cached ver.)"));
+    item.appendChild(link);
+    nav.appendChild(item);
+  }
+
   function injectStyles() {
     if (stylesInjected) return;
     stylesInjected = true;
@@ -1003,17 +1365,22 @@
       .whcs-cache-note { margin: 8px 0 16px; color: #777; }
       .whcs-status { display: block; margin-top: 6px; }
       .whcs-sync-prefix { color: #d50855; }
+      .whcs-notice { color: #d50855; font-weight: 700; }
       .whcs-actions button.whcs-disabled,
       .whcs-actions button:disabled { cursor: wait; opacity: .45; }
+      [data-whcs-reviews-link] { cursor: pointer; }
     `);
   }
 
   function boot() {
     injectStyles();
-    clearStatsLinkActive();
+    clearVirtualLinkActive();
     if (location.pathname.startsWith("/se/member")) {
       fetchMe().then((user) => {
-        if (user) addStatsLink();
+        if (user) {
+          addStatsLink();
+          addReviewsLink();
+        }
       }).catch(console.error);
     }
   }
@@ -1028,10 +1395,19 @@
       return;
     }
 
+    const reviewsLink = event.target.closest("[data-whcs-reviews-link]");
+    if (reviewsLink) {
+      showReviews(event);
+      return;
+    }
+
     if (event.target.closest(".member-nav a")) {
-      clearStatsLinkActive();
+      clearVirtualLinkActive();
     }
   }, true);
   window.addEventListener("urlchange", boot);
-  new MutationObserver(() => addStatsLink()).observe(document.documentElement, { childList: true, subtree: true });
+  new MutationObserver(() => {
+    addStatsLink();
+    addReviewsLink();
+  }).observe(document.documentElement, { childList: true, subtree: true });
 })();
