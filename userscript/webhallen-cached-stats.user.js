@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Webhallen cached stats
 // @namespace    Webhallen
-// @version      1.1.0
+// @version      1.1.1
 // @description  Adds a faster statistics page with persistent local order cache and incremental sync.
 // @author       Linus, based on the code from Schanihbg/webhallen-userscript
 // @match        https://www.webhallen.com/*
@@ -22,6 +22,7 @@
   const ORDER_STORE = "orders";
   const REVIEW_STORE = "reviews";
   const META_STORE = "meta";
+  const REVIEW_ICON_URL = "//www.webhallen.com/img/icons/feed/feed_review.svg";
 
   let cachedMe = null;
   let stylesInjected = false;
@@ -1345,9 +1346,9 @@
       title: "Visa recensioner från lokal cache",
     });
     const image = el("img", {
-      src: "//www.webhallen.com/img/icons/feed/feed_review.svg",
+      src: REVIEW_ICON_URL,
       class: "member-icon",
-      alt: "Recensioner (cached ver.)",
+      alt: "Recensioner",
     });
     link.appendChild(image);
     link.appendChild(document.createTextNode("Recensioner (cached ver.)"));

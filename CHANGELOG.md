@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1.1
+
+### Changed
+
+- Recensioner-menyn använder originalscriptets recensionsikon tydligare.
+
 ## 1.1.0
 
 ### Added
