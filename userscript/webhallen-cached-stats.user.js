@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Webhallen cached stats
 // @namespace    Webhallen
-// @version      1.1.1
+// @version      1.1.2
 // @description  Adds a faster statistics page with persistent local order cache and incremental sync.
 // @author       Linus, based on the code from Schanihbg/webhallen-userscript
 // @match        https://www.webhallen.com/*
@@ -23,6 +23,7 @@
   const REVIEW_STORE = "reviews";
   const META_STORE = "meta";
   const REVIEW_ICON_URL = "//www.webhallen.com/img/icons/feed/feed_review.svg";
+  const INCREMENTAL_KNOWN_PAGE_GRACE = 5;
 
   let cachedMe = null;
   let stylesInjected = false;
@@ -275,21 +276,38 @@
     let page = 1;
     let reachedKnownOrder = false;
     let reachedEmptyPage = false;
+    let knownPagesSinceLastNew = 0;
 
-    while (!reachedKnownOrder) {
-      onProgress({ page, fetched: fetched.length, done: false, canStopAtKnownOrder });
+    while (true) {
+      onProgress({
+        page,
+        fetched: fetched.length,
+        done: false,
+        canStopAtKnownOrder,
+        verifyingExistingCache: canStopAtKnownOrder && reachedKnownOrder,
+      });
       const pageOrders = await fetchOrderPage(userId, page);
       if (!pageOrders.length) {
         reachedEmptyPage = true;
         break;
       }
 
+      let foundNewOnPage = false;
       for (const order of pageOrders) {
         if (canStopAtKnownOrder && knownIds.has(String(order.id))) {
           reachedKnownOrder = true;
-          break;
+          continue;
         }
         fetched.push(order);
+        knownIds.add(String(order.id));
+        foundNewOnPage = true;
+      }
+
+      if (canStopAtKnownOrder && reachedKnownOrder) {
+        knownPagesSinceLastNew = foundNewOnPage ? 0 : knownPagesSinceLastNew + 1;
+        if (knownPagesSinceLastNew >= INCREMENTAL_KNOWN_PAGE_GRACE) {
+          break;
+        }
       }
 
       page++;
@@ -300,11 +318,13 @@
       lastSyncAt: Date.now(),
       lastSyncMode: full ? "full" : "incremental",
       lastFetchedOrders: fetched.length,
+      lastScannedOrderPages: page,
       fullCacheComplete: reachedEmptyPage || cacheWasPreviouslyCompleted,
     });
 
     return {
       fetched: fetched.length,
+      scannedPages: page,
       reachedKnownOrder,
       reachedEmptyPage,
       orders: await getCachedOrders(userId),
@@ -1130,14 +1150,14 @@
     try {
       const result = await syncOrders(user.id, {
         full,
-        onProgress: ({ page, fetched, canStopAtKnownOrder }) => {
+        onProgress: ({ page, fetched, canStopAtKnownOrder, verifyingExistingCache }) => {
           const message = canStopAtKnownOrder
-            ? `Ordrar hämtade under körningen: ${fetched}.`
+            ? `${verifyingExistingCache ? "Kontrollerar cacheluckor" : "Söker nya ordrar"}: sida ${page}. Ordrar hämtade under körningen: ${fetched}.`
             : `Hämtar sida ${page}. Ordrar hämtade under körningen: ${fetched}.`;
           setSyncStatus(status, message, true);
         },
       });
-      setSyncStatus(status, `Klart. Hämtade ${result.fetched} nya ordrar.`);
+      setSyncStatus(status, `Klart. Hämtade ${result.fetched} nya eller saknade ordrar.`);
       await renderStats(container, user, result.orders, result.meta);
     } finally {
       syncingUsers.delete(syncKey);

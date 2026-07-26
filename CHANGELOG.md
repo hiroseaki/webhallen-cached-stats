@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.1.2
+
+### Fixed
+
+- Incremental order sync now checks a few pages past known orders to repair incomplete local caches without requiring a full rebuild.
+- Sync status now says when it is checking for cache gaps.
+
 ## 1.1.1
 
 ### Changed
