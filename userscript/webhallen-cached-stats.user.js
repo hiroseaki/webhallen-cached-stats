@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Webhallen cached stats
 // @namespace    Webhallen
-// @version      1.1.2
+// @version      1.1.3
 // @description  Adds a faster statistics page with persistent local order cache and incremental sync.
 // @author       Linus, based on the code from Schanihbg/webhallen-userscript
 // @match        https://www.webhallen.com/*
@@ -23,7 +23,6 @@
   const REVIEW_STORE = "reviews";
   const META_STORE = "meta";
   const REVIEW_ICON_URL = "//www.webhallen.com/img/icons/feed/feed_review.svg";
-  const INCREMENTAL_KNOWN_PAGE_GRACE = 5;
 
   let cachedMe = null;
   let stylesInjected = false;
@@ -263,8 +262,14 @@
   }
 
   async function fetchOrderPage(userId, page) {
-    const data = await fetchApi(`/api/order/user/${encodeURIComponent(userId)}?filters[history]=true&sort=orderStatus`, { page });
-    return Array.isArray(data.orders) ? data.orders.filter((order) => !order.error) : [];
+    const data = await fetchApi(`/api/order/user/${encodeURIComponent(userId)}`, {
+      "filters[history]": "true",
+      page,
+      sort: "sentDate",
+    });
+    return Array.isArray(data.orders)
+      ? data.orders.filter((order) => !order.error && Number(order.statusCode) === 4)
+      : [];
   }
 
   async function syncOrders(userId, { full = false, onProgress = () => {} } = {}) {
@@ -276,38 +281,25 @@
     let page = 1;
     let reachedKnownOrder = false;
     let reachedEmptyPage = false;
-    let knownPagesSinceLastNew = 0;
 
-    while (true) {
-      onProgress({
-        page,
-        fetched: fetched.length,
-        done: false,
-        canStopAtKnownOrder,
-        verifyingExistingCache: canStopAtKnownOrder && reachedKnownOrder,
-      });
+    while (!reachedKnownOrder) {
+      onProgress({ page, fetched: fetched.length, done: false, canStopAtKnownOrder });
       const pageOrders = await fetchOrderPage(userId, page);
       if (!pageOrders.length) {
         reachedEmptyPage = true;
         break;
       }
 
-      let foundNewOnPage = false;
       for (const order of pageOrders) {
-        if (canStopAtKnownOrder && knownIds.has(String(order.id))) {
-          reachedKnownOrder = true;
+        if (knownIds.has(String(order.id))) {
+          if (canStopAtKnownOrder) {
+            reachedKnownOrder = true;
+            break;
+          }
           continue;
         }
         fetched.push(order);
         knownIds.add(String(order.id));
-        foundNewOnPage = true;
-      }
-
-      if (canStopAtKnownOrder && reachedKnownOrder) {
-        knownPagesSinceLastNew = foundNewOnPage ? 0 : knownPagesSinceLastNew + 1;
-        if (knownPagesSinceLastNew >= INCREMENTAL_KNOWN_PAGE_GRACE) {
-          break;
-        }
       }
 
       page++;
@@ -318,13 +310,11 @@
       lastSyncAt: Date.now(),
       lastSyncMode: full ? "full" : "incremental",
       lastFetchedOrders: fetched.length,
-      lastScannedOrderPages: page,
       fullCacheComplete: reachedEmptyPage || cacheWasPreviouslyCompleted,
     });
 
     return {
       fetched: fetched.length,
-      scannedPages: page,
       reachedKnownOrder,
       reachedEmptyPage,
       orders: await getCachedOrders(userId),
@@ -1150,14 +1140,14 @@
     try {
       const result = await syncOrders(user.id, {
         full,
-        onProgress: ({ page, fetched, canStopAtKnownOrder, verifyingExistingCache }) => {
+        onProgress: ({ page, fetched, canStopAtKnownOrder }) => {
           const message = canStopAtKnownOrder
-            ? `${verifyingExistingCache ? "Kontrollerar cacheluckor" : "Söker nya ordrar"}: sida ${page}. Ordrar hämtade under körningen: ${fetched}.`
+            ? `Kontrollerar orderhistorik: sida ${page}. Ordrar hämtade under körningen: ${fetched}.`
             : `Hämtar sida ${page}. Ordrar hämtade under körningen: ${fetched}.`;
           setSyncStatus(status, message, true);
         },
       });
-      setSyncStatus(status, `Klart. Hämtade ${result.fetched} nya eller saknade ordrar.`);
+      setSyncStatus(status, `Klart. Hämtade ${result.fetched} nya ordrar.`);
       await renderStats(container, user, result.orders, result.meta);
     } finally {
       syncingUsers.delete(syncKey);

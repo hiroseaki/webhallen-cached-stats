@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.3
+
+### Fixed
+
+- Incremental order sync now uses Webhallen's current `sentDate` sorting for order history, so newly completed orders appear before already cached orders.
+- Only orders with completed/delivered status are stored; active and cancelled orders are excluded.
+- Reverted the 1.1.2 cache-gap scanning approach because it did not solve newly placed orders.
+
 ## 1.1.2
 
 ### Fixed
