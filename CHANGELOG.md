@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.1.4
+
+### Changed
+
+- Full cache rebuilds pause for five seconds after every 100 cached orders to reduce the risk of Webhallen rate limiting the sync.
+- HTTP 429 responses now respect Webhallen's `Retry-After` header and retry automatically up to three times.
+- Incremental sync remains unthrottled so checking for new orders stays fast.
+
 ## 1.1.3
 
 ### Fixed

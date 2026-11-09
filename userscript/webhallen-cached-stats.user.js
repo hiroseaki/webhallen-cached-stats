@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Webhallen cached stats
 // @namespace    Webhallen
-// @version      1.1.3
+// @version      1.1.4
 // @description  Adds a faster statistics page with persistent local order cache and incremental sync.
 // @author       Linus, based on the code from Schanihbg/webhallen-userscript
 // @match        https://www.webhallen.com/*
@@ -23,6 +23,9 @@
   const REVIEW_STORE = "reviews";
   const META_STORE = "meta";
   const REVIEW_ICON_URL = "//www.webhallen.com/img/icons/feed/feed_review.svg";
+  const FULL_SYNC_COOLDOWN_EVERY = 100;
+  const FULL_SYNC_COOLDOWN_MS = 5000;
+  const RATE_LIMIT_RETRIES = 3;
 
   let cachedMe = null;
   let stylesInjected = false;
@@ -34,23 +37,46 @@
     return new URL(path, "https://www.webhallen.com").toString();
   }
 
+  function wait(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function retryAfterMs(response, attempt) {
+    const retryAfter = response.headers.get("Retry-After");
+    if (retryAfter) {
+      const seconds = Number(retryAfter);
+      if (Number.isFinite(seconds)) return Math.max(1000, seconds * 1000);
+
+      const retryDate = Date.parse(retryAfter);
+      if (Number.isFinite(retryDate)) return Math.max(1000, retryDate - Date.now());
+    }
+    return 10000 * (attempt + 1);
+  }
+
   async function fetchApi(path, params = {}) {
     const url = new URL(apiUrl(path));
     for (const [key, value] of Object.entries(params)) {
       url.searchParams.set(key, String(value));
     }
 
-    const response = await fetch(url.toString(), {
-      credentials: "same-origin",
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(30000),
-    });
+    for (let attempt = 0; attempt <= RATE_LIMIT_RETRIES; attempt++) {
+      const response = await fetch(url.toString(), {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(30000),
+      });
 
-    if (!response.ok) {
+      if (response.ok) return response.json();
+
+      if (response.status === 429 && attempt < RATE_LIMIT_RETRIES) {
+        await wait(retryAfterMs(response, attempt));
+        continue;
+      }
+
       throw new Error(`Webhallen API svarade ${response.status} for ${url.pathname}`);
     }
 
-    return response.json();
+    throw new Error(`Webhallen API kunde inte hämtas från ${url.pathname}`);
   }
 
   async function fetchMe() {
@@ -281,6 +307,7 @@
     let page = 1;
     let reachedKnownOrder = false;
     let reachedEmptyPage = false;
+    let nextCooldownAt = FULL_SYNC_COOLDOWN_EVERY;
 
     while (!reachedKnownOrder) {
       onProgress({ page, fetched: fetched.length, done: false, canStopAtKnownOrder });
@@ -303,6 +330,18 @@
       }
 
       page++;
+
+      if (full && fetched.length >= nextCooldownAt) {
+        onProgress({
+          page,
+          fetched: fetched.length,
+          done: false,
+          canStopAtKnownOrder,
+          cooldownMs: FULL_SYNC_COOLDOWN_MS,
+        });
+        await wait(FULL_SYNC_COOLDOWN_MS);
+        while (fetched.length >= nextCooldownAt) nextCooldownAt += FULL_SYNC_COOLDOWN_EVERY;
+      }
     }
 
     await saveOrders(userId, fetched);
@@ -1140,10 +1179,14 @@
     try {
       const result = await syncOrders(user.id, {
         full,
-        onProgress: ({ page, fetched, canStopAtKnownOrder }) => {
-          const message = canStopAtKnownOrder
-            ? `Kontrollerar orderhistorik: sida ${page}. Ordrar hämtade under körningen: ${fetched}.`
-            : `Hämtar sida ${page}. Ordrar hämtade under körningen: ${fetched}.`;
+        onProgress: ({ page, fetched, canStopAtKnownOrder, cooldownMs }) => {
+          let message = `Hämtar sida ${page}. Ordrar hämtade under körningen: ${fetched}.`;
+          if (canStopAtKnownOrder) {
+            message = `Kontrollerar orderhistorik: sida ${page}. Ordrar hämtade under körningen: ${fetched}.`;
+          }
+          if (cooldownMs) {
+            message = `Pausar ${Math.round(cooldownMs / 1000)} sekunder efter ${fetched} ordrar för att undvika Webhallens hastighetsbegränsning.`;
+          }
           setSyncStatus(status, message, true);
         },
       });
